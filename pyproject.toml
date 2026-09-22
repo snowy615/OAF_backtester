@@ -19,9 +19,8 @@ dependencies = [
 llm = ["anthropic>=1.0"]
 ibkr = ["ib_async>=1.0"]
 yahoo = ["yfinance>=0.2.40"]
-plots = ["matplotlib>=3.8"]
 dev = ["pytest>=8"]
-all = ["oaf-backtester[llm,ibkr,yahoo,plots,dev]"]
+all = ["oaf-backtester[llm,ibkr,yahoo,dev]"]
 
 [project.scripts]
 oaf = "oaf.cli:main"

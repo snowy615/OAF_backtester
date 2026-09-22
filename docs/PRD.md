@@ -54,6 +54,7 @@ Vol targeting and drawdown circuit breakers live at the portfolio-sim layer.
 |---|---|
 | Idea → parameterised strategy object | `oaf.llm.idea_to_signal`, `oaf.spec.StrategySpec` |
 | Every knob named and tunable | `StrategySpec.params`; expressions reference params by name |
+| Data ingestion (Massive market data) | `oaf.data.massive` → `oaf fetch-massive`; constituent lists via `oaf.data.universes` |
 | Claude-assisted normalisation | `oaf.llm.data_mapper` → `oaf.data.ingest.ColumnMapping` |
 | Point-in-time correctness | `Warehouse.load_panel` (`available_date` fundamentals, membership intervals), backward-looking DSL |
 | Survivorship-bias handling | delisted names kept, delisting returns booked, `Warehouse.survivorship_report` |
@@ -61,6 +62,7 @@ Vol targeting and drawdown circuit breakers live at the portfolio-sim layer.
 | Systematic sweeps | `oaf.sweep.run_sweep` |
 | Walk-forward preferred | `oaf.sweep.walk_forward` |
 | Minimum metric set + deflated Sharpe | `oaf.metrics` |
+| Performance reported | `oaf.dashboard` (HTML report per run + `runs/index.html`) |
 | Vol targeting + drawdown breaker at the sim layer | `oaf.sim._risk_overlay` (`SimConfig.vol_target`, `dd_limit`) |
 | IBKR, allocate size, trade | `oaf.deploy.orders.build_plan`, `oaf.deploy.ibkr` |
 | Paper Y1 → live Y2 | `oaf.deploy.ibkr.check_gates` |

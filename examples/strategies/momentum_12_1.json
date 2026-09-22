@@ -4,11 +4,37 @@
   "idea": "Stocks that have gone up the most over the past six months keep outperforming, as long as you skip the most recent week.",
   "description": "Cross-sectional price momentum: rank index members by their return over the lookback window, skipping the most recent days, then hold the winners against the losers.",
   "hypothesis": "Investors under-react to slowly arriving news, so trends persist for months; the last week is skipped because very recent returns tend to reverse.",
-  "universe": {"name": "demo_index", "tickers": [], "description": "Point-in-time members of the demo index"},
+  "universe": {
+    "name": "all",
+    "tickers": [],
+    "min_adv": 5000000,
+    "description": "Every stock in the warehouse with at least $5m/day traded"
+  },
   "params": [
-    {"name": "lookback", "value": 120, "low": 60, "high": 250, "kind": "int", "description": "Days of return history that define a winner"},
-    {"name": "skip", "value": 5, "low": 1, "high": 21, "kind": "int", "description": "Most recent days excluded to avoid short-term reversal"},
-    {"name": "top_quantile", "value": 0.2, "low": 0.1, "high": 0.3, "kind": "float", "description": "Fraction of the universe held long, and short"}
+    {
+      "name": "lookback",
+      "value": 120,
+      "low": 60,
+      "high": 250,
+      "kind": "int",
+      "description": "Days of return history that define a winner"
+    },
+    {
+      "name": "skip",
+      "value": 5,
+      "low": 1,
+      "high": 21,
+      "kind": "int",
+      "description": "Most recent days excluded to avoid short-term reversal"
+    },
+    {
+      "name": "top_quantile",
+      "value": 0.2,
+      "low": 0.1,
+      "high": 0.3,
+      "kind": "float",
+      "description": "Fraction of the universe held long, and short"
+    }
   ],
   "signal": "rank(ts_delay(close, skip) / ts_delay(close, skip + lookback) - 1)",
   "rules": null,
@@ -23,5 +49,8 @@
     "vol_lookback": "60"
   },
   "rebalance": "weekly",
-  "assumptions": ["Six months taken as 120 trading days", "Dollar-neutral long-short, equal weighted"]
+  "assumptions": [
+    "Six months taken as 120 trading days",
+    "Dollar-neutral long-short, equal weighted"
+  ]
 }

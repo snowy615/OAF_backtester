@@ -15,7 +15,7 @@ import pandas as pd
 from pydantic import BaseModel
 
 from ..panel import Panel
-from ..signal import target_weights
+from ..signal import apply_universe, target_weights
 from ..sim import SimConfig, rebalance_flags, run_backtest
 from ..spec import StrategySpec
 
@@ -94,8 +94,7 @@ def build_plan(
     The targets are exactly what the simulator would hold next: weights from the most
     recent rebalance decision, scaled by the risk overlay's current multiplier.
     """
-    if spec.universe.tickers:
-        panel = panel.restrict(spec.universe.tickers)
+    panel = apply_universe(spec, panel)
     result = run_backtest(spec, panel, config)
     targets = target_weights(spec, panel)
     flags = pd.Series(rebalance_flags(targets.index, spec.rebalance), index=targets.index)

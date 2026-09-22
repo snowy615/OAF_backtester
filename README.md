@@ -22,23 +22,47 @@ at any point without rebuilding anything. The product spec is in [docs/PRD.md](d
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[all]"          # or pick extras: llm, ibkr, yahoo, plots, dev
-pytest                           # 66 tests, ~3s
-
-oaf demo-data -w data/demo       # synthetic market: delistings, index changes, splits, lagged fundamentals
-oaf backtest    examples/strategies/momentum_12_1.json -w data/demo
-oaf sweep       examples/strategies/momentum_12_1.json -w data/demo --grid lookback=60,120,250 skip=1,5,21
-oaf walkforward examples/strategies/momentum_12_1.json -w data/demo --train-days 504 --test-days 252
-oaf deploy      examples/strategies/momentum_12_1.json -w data/demo --capital 100000   # dry run
+pip install -e ".[all]"          # or pick extras: llm, ibkr, yahoo, dev
+pytest                           # 75 tests, ~3s
+cp .env.example .env             # then set MASSIVE_API_KEY (and ANTHROPIC_API_KEY for `oaf pitch`)
 ```
 
-With a Claude key (`cp .env.example .env`, set `ANTHROPIC_API_KEY`):
+Load real market data from **Massive** (massive.com, formerly Polygon.io) into the default warehouse:
 
 ```bash
-oaf pitch "Buy index stocks with the highest earnings yield that are also in an uptrend; rebalance monthly" -w data/demo
-oaf backtest strategies/<name>.json -w data/demo
-oaf pitch "make it sector-neutral and long-only" --refine strategies/<name>.json -w data/demo
+# a list of names (plus every split, and delisting dates from the reference list)
+oaf fetch-massive --tickers AAPL MSFT NVDA JPM XOM --start 2016-01-01 --universe mega_caps
+
+# the whole US common-stock market, one grouped-daily call per session, with financials
+oaf fetch-massive --market --start 2016-01-01 --fundamentals
+
+# an index constituent list (dated snapshots or start/end intervals) as a point-in-time universe
+oaf fetch-massive --tickers-file data/sp500_history.csv --universe sp500 --start 2016-01-01
+
+oaf fetch-massive                # later: refresh from the last stored date
+oaf info                         # what the warehouse holds, and whether it looks survivorship-biased
 ```
+
+Then run the workflow:
+
+```bash
+oaf backtest    examples/strategies/momentum_12_1.json --open
+oaf sweep       examples/strategies/momentum_12_1.json --grid lookback=60,120,250 skip=1,5,21
+oaf walkforward examples/strategies/momentum_12_1.json --train-days 504 --test-days 252
+oaf dashboard --open             # runs/index.html: every run side by side
+oaf deploy      examples/strategies/momentum_12_1.json --capital 100000   # dry run
+```
+
+With a Claude key:
+
+```bash
+oaf pitch "Buy stocks with the highest earnings yield that are also in an uptrend; rebalance monthly"
+oaf backtest strategies/<name>.json --open
+oaf pitch "make it sector-neutral and long-only" --refine strategies/<name>.json
+```
+
+No key handy? `oaf demo-data -w data/demo` writes a synthetic market (with delistings, index
+changes, splits and lagged fundamentals) and every command takes `-w data/demo`.
 
 ## The workflow
 
@@ -52,8 +76,8 @@ oaf pitch "make it sector-neutral and long-only" --refine strategies/<name>.json
 | 6 | Performance metrics | printed + `runs/<name>/` (tearsheet, CSVs, plot) | `oaf.metrics`, `oaf.report` |
 | 7–9 | Connect to IBKR, allocate size, trade | `oaf deploy --capital N [--send]` | `oaf.deploy` |
 
-Data gets in through `oaf ingest <file> [--llm]` or `oaf fetch-yahoo`; `oaf info` shows what a
-warehouse holds and whether it looks survivorship-biased.
+Data gets in through `oaf fetch-massive` (primary), `oaf universe` for constituent lists,
+`oaf ingest <file> [--llm]` for arbitrary files, or `oaf fetch-yahoo` for quick prototypes.
 
 ## The strategy object
 
@@ -114,14 +138,41 @@ model and the engine can never drift apart.
 - Server-side refusal fallbacks are enabled by default (`OAF_CLAUDE_FALLBACKS=0` to turn
   off); override the model with `OAF_CLAUDE_MODEL`.
 
-## Data: point-in-time and survivorship
+## Data
+
+### Massive (massive.com)
+
+`oaf fetch-massive` is the production data path. It pulls, via the REST API with only the
+standard library:
+
+| Massive endpoint | Warehouse table | Notes |
+|---|---|---|
+| `/v2/aggs/ticker/{t}/range/1/day/…` (per ticker) or `/v2/aggs/grouped/locale/us/market/stocks/{date}` (`--market`) | `prices` | Unadjusted OHLCV stored as-is |
+| `/stocks/v1/splits` | `prices.adj_close` | Adjusted close is rebuilt from the splits table so raw and adjusted series are consistent |
+| `/v3/reference/tickers`, `active=true` **and** `false` | `meta` | The inactive list is what keeps delisted names in the universe (`delisted_utc` → `delisted_date`) |
+| `/v3/reference/tickers/{t}` (`--sectors`) | `meta.sector` | SIC description, one call per ticker |
+| `/stocks/financials/v1/income-statements`, `/balance-sheets` (`--fundamentals`) | `fundamentals` | `filing_date` becomes `available_date`; fields `revenue net_income eps eps_diluted shares_outstanding total_equity total_assets total_liabilities cash` |
+
+A membership interval (first bar → delisting date) is written for every fetched ticker under
+`--universe NAME`; with `--tickers-file` the file's own dates are used instead. Re-running
+without `--start` appends from the last stored date and re-bases stored history for any split
+that happened since. Set `MASSIVE_API_KEY` in `.env`; on the free plan pass
+`--calls-per-minute 5`. Financials need the Stocks Advanced plan or the Financials add-on.
+
+Massive does not publish index constituents. For a point-in-time S&P 500 (or any index),
+supply a CSV of dated snapshots (`date,ticker`) or intervals (`ticker,start_date,end_date`)
+via `oaf universe NAME file.csv` or `--tickers-file`. A bare ticker list is accepted but
+flagged as survivors-only.
+
+### Point-in-time and survivorship
 
 The warehouse is four parquet tables ([schema](src/oaf/data/schema.py)):
 
 - **prices** – delisted tickers stay; their rows simply stop. Returns use `adj_close`; the raw
   close is kept for order sizing. Halts are forward-filled but never past the final print.
-- **membership** – index constituents as date intervals. `rank()` and friends only see stocks
-  that were members *on that day*; leaving the index closes the position.
+- **membership** – universe constituents as date intervals. `rank()` and friends only see stocks
+  that were members *on that day*; leaving the universe closes the position. A spec can also set
+  `universe.min_adv` to drop names below a dollar-volume floor, computed point-in-time.
 - **fundamentals** – stored with both `period_end` and `available_date`; panels are built on
   `available_date` only, with restatements applying from their own publication date.
 - **meta** – sector plus delisting date/return. The delisting return is booked on the first
@@ -159,6 +210,17 @@ Sortino, Calmar, hit rate, turnover.
   configuration, score it only on the following unseen window, stitch the out-of-sample
   pieces together, and report how much the score degrades out of sample.
 
+## Dashboard
+
+Every run writes `runs/<name>/report.html`: a single self-contained page (inline CSS and SVG,
+no JavaScript, no CDN) with KPI tiles, growth vs the equal-weight universe, drawdown, rolling
+Sharpe, a monthly-returns heatmap, exposure, the parameter table, and – for sweeps and
+walk-forwards – the configuration table and per-fold results. `oaf dashboard` builds
+`runs/index.html` comparing every run with sparklines; `--open` on any command opens the page
+in a browser. Reports work offline and can be attached to a pitch as-is. The CSV/JSON
+alongside (`returns.csv`, `metrics.json`, `spec.json`, `sweep.csv`, `folds.csv`) are the same
+numbers for anyone who wants to plot their own.
+
 ## IBKR deployment
 
 `oaf deploy spec.json --capital 100000` sizes the strategy's latest rebalance targets (times
@@ -193,10 +255,13 @@ print(wf.metrics["sharpe"], wf.degradation)
 
 - Daily bars, equities, close-to-close fills; no intraday, futures or options yet.
 - Costs are linear in turnover (no market-impact model); borrow is a flat rate.
+- The Massive client is written against the current REST docs and tested with a scripted
+  transport; run one `fetch-massive` with your key to confirm entitlements (history depth and
+  financials depend on the plan).
 - The IBKR layer is written against `ib_async` and its safety gates and order maths are unit
   tested, but it has not yet been exercised against a running TWS/Gateway – do a `--send`
   shakedown on the paper account before relying on it.
 - The Claude stages are tested against a scripted stand-in for the SDK client; run
   `oaf pitch` once with a real key to confirm end to end.
-- The demo warehouse is synthetic and has a momentum effect planted in it, so example
-  Sharpe ratios are not evidence of anything. Real data sources still need to be wired in.
+- Index membership history is not available from Massive; without a constituent file the
+  universe is "everything listed", filtered by liquidity.

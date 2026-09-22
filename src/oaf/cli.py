@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -101,6 +102,108 @@ def cmd_fetch_yahoo(args) -> None:
     print(wh.survivorship_report().summary())
 
 
+def _bar(label: str):
+    def show(i, n, what):
+        print(f"\r  {label} {i}/{n} {what:<24}", end="" if i < n else "\n", flush=True)
+
+    return show
+
+
+def cmd_fetch_massive(args) -> None:
+    from .data import massive as mx
+    from .data.ingest import clean_prices
+
+    client = mx.MassiveClient(calls_per_minute=args.calls_per_minute)
+    wh = Warehouse(args.warehouse)
+    start = args.start
+    if start is None:
+        existing = wh.read("prices")
+        if existing.empty:
+            sys.exit("error: --start is required for a fresh warehouse (e.g. --start 2016-01-01)")
+        start = (existing["date"].max() + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+        print(f"refreshing from {start}")
+
+    print("tickers (active + delisted)...")
+    meta = mx.fetch_tickers(client, include_delisted=True)
+    universe_name = args.universe
+
+    refreshing = args.start is None
+    if args.market:
+        exchanges = set(args.exchanges or [])
+        listed = meta if not exchanges else meta[meta["primary_exchange"].isin(exchanges)]
+        keep_set = set(listed["ticker"])
+        splits = mx.fetch_splits(client, start=start if refreshing else None)
+        prices = mx.fetch_market(client, start, args.end, keep=keep_set.__contains__, splits=splits, progress=_bar("day"))
+        universe_name = universe_name or "us_stocks"
+    else:
+        tickers = list(args.tickers or [])
+        if args.tickers_file:
+            from .data.universes import load_membership
+
+            tickers += load_membership(args.tickers_file, universe_name or "list")["ticker"].unique().tolist()
+        tickers = sorted(dict.fromkeys(t.upper() for t in tickers))
+        if not tickers:
+            sys.exit("error: give --tickers, --tickers-file or --market")
+        splits = mx.fetch_splits(client, tickers, start=start if refreshing else None)
+        prices = mx.fetch_daily_bars(client, tickers, start, args.end, splits=splits, progress=_bar("ticker"))
+        universe_name = universe_name or "list"
+
+    prices, report = clean_prices(prices)
+    print(report.summary())
+    if prices.empty:
+        sys.exit("error: Massive returned no bars (check the plan's history limit and the tickers)")
+    n = wh.write_prices(prices, source="massive")
+    if refreshing and len(splits):  # a split since the last refresh re-bases the stored history
+        n = wh.write_prices(mx.readjust_history(wh.read("prices"), splits, start), source="massive:readjust", replace=True)
+    got = prices["ticker"].unique()
+    meta_rows = meta[meta["ticker"].isin(got)].copy()
+    missing = sorted(set(got) - set(meta_rows["ticker"]))
+    if missing:
+        meta_rows = pd.concat([meta_rows, pd.DataFrame({"ticker": missing})], ignore_index=True)
+    if args.sectors:
+        meta_rows["sector"] = meta_rows["ticker"].map(mx.fetch_sectors(client, list(meta_rows["ticker"]), progress=_bar("sector")))
+    old_meta = wh.read("meta").set_index("ticker") if wh.has("meta") else None
+    if old_meta is not None and not args.sectors:  # keep sectors fetched earlier
+        meta_rows["sector"] = meta_rows["ticker"].map(old_meta["sector"]).where(lambda s: s.notna(), meta_rows["sector"])
+    from .data import schema
+
+    for col in schema.META:
+        if col not in meta_rows:
+            meta_rows[col] = None
+    wh.write_meta(meta_rows[schema.META], source="massive")
+
+    if not args.tickers_file:  # a constituent file is loaded as-is via `oaf universe`
+        all_prices = wh.read("prices")
+        all_prices = all_prices[all_prices["ticker"].isin(got)]
+        wh.write_membership(mx.membership_from_prices(all_prices, wh.read("meta"), universe_name), source="massive", replace=False)
+    else:
+        from .data.universes import load_membership
+
+        wh.write_membership(load_membership(args.tickers_file, universe_name), source=str(args.tickers_file))
+
+    if args.fundamentals:
+        fund = mx.fetch_fundamentals(client, list(got), start=None, progress=_bar("financials"))
+        print(f"  {len(fund)} fundamental observations")
+        if len(fund):
+            wh.write_fundamentals(fund, source="massive")
+
+    print(f"{client.n_calls} API calls; warehouse now holds {n} price rows, universe '{universe_name}'")
+    print(wh.survivorship_report().summary())
+
+
+def cmd_universe(args) -> None:
+    from .data.universes import load_membership
+
+    mem = load_membership(args.file, args.name)
+    wh = Warehouse(args.warehouse)
+    wh.write_membership(mem, source=str(args.file), replace=False)
+    known = set(wh.read("prices")["ticker"]) if wh.has("prices") else set()
+    missing = sorted(set(mem["ticker"]) - known)
+    print(f"universe '{args.name}': {mem['ticker'].nunique()} tickers, {len(mem)} membership intervals")
+    if missing:
+        print(f"  {len(missing)} tickers have no prices yet, e.g. {missing[:8]} - run `oaf fetch-massive --tickers-file {args.file}`")
+
+
 def cmd_pitch(args) -> None:
     from .llm.idea_to_signal import refine_spec, structure_idea
 
@@ -139,7 +242,8 @@ def cmd_backtest(args) -> None:
     result = run_backtest(spec, panel, config)
     print(format_metrics(result.metrics, spec.name))
     out = save_run(result, args.out or Path("runs") / spec.name)
-    print(f"\nrun saved to {out}/")
+    print(f"\nrun saved to {out}/  (report: {out / 'report.html'})")
+    _refresh_index(out, args.open)
 
 
 def cmd_sweep(args) -> None:
@@ -154,9 +258,10 @@ def cmd_sweep(args) -> None:
     print("\n" + format_metrics(sweep.best.metrics, f"best of {len(sweep.trials)}: {sweep.best_overrides}"))
     print("\nThis configuration was chosen in sample; trust the deflated Sharpe, and confirm with `oaf walkforward`.")
     out = Path(args.out or Path("runs") / f"{spec.name}_sweep")
-    save_run(sweep.best, out)
+    save_run(sweep.best, out, sweep_table=sweep.table)
     sweep.table.to_csv(out / "sweep.csv", index_label="trial")
-    print(f"sweep saved to {out}/ (spec.json there is the tuned strategy)")
+    print(f"sweep saved to {out}/ (spec.json there is the tuned strategy; report: {out / 'report.html'})")
+    _refresh_index(out, args.open)
 
 
 def cmd_walkforward(args) -> None:
@@ -172,10 +277,30 @@ def cmd_walkforward(args) -> None:
     print("\n" + format_metrics(wf.metrics, f"{spec.name}: stitched out-of-sample"))
     print(f"\nmean out-of-sample minus in-sample {wf.objective}: {wf.degradation:+.2f}")
     out = Path(args.out or Path("runs") / f"{spec.name}_walkforward")
-    out.mkdir(parents=True, exist_ok=True)
+    # the report shows the full-sample run of the spec's own defaults alongside the OOS results
+    save_run(run_backtest(spec, panel, config), out, walk_forward=wf)
+    (out / "metrics.json").write_text(json.dumps({**wf.metrics, "start": str(wf.oos_returns.index[0].date()), "end": str(wf.oos_returns.index[-1].date())}, indent=2, default=str) + "\n")
     wf.folds.to_csv(out / "folds.csv", index=False)
     wf.oos_returns.rename("oos_return").to_csv(out / "oos_returns.csv", index_label="date")
-    print(f"saved to {out}/")
+    print(f"saved to {out}/  (report: {out / 'report.html'})")
+    _refresh_index(out, args.open)
+
+
+def _refresh_index(run_dir: Path, open_browser: bool) -> None:
+    from .dashboard import build_index, open_in_browser
+
+    build_index(run_dir.parent)
+    if open_browser:
+        open_in_browser(run_dir / "report.html")
+
+
+def cmd_dashboard(args) -> None:
+    from .dashboard import build_index, open_in_browser
+
+    out = build_index(args.runs)
+    print(f"dashboard: {out}")
+    if args.open:
+        open_in_browser(out)
 
 
 def cmd_deploy(args) -> None:
@@ -221,6 +346,7 @@ def build_parser() -> argparse.ArgumentParser:
             sp.add_argument("--end")
             sp.add_argument("--set", nargs="*", metavar="KNOB=VALUE", help="override knobs, e.g. lookback=90 sim.vol_target=0.1")
             sp.add_argument("--out", help="output directory")
+            sp.add_argument("--open", action="store_true", help="open the HTML report in a browser")
         return sp
 
     add("demo-data", cmd_demo_data, "write a synthetic warehouse to play with")
@@ -235,6 +361,22 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("tickers", nargs="+")
     sp.add_argument("--start", required=True)
     sp.add_argument("--end")
+
+    sp = add("fetch-massive", cmd_fetch_massive, "load real market data from Massive (massive.com) into the warehouse")
+    sp.add_argument("--tickers", nargs="*", help="tickers to fetch")
+    sp.add_argument("--tickers-file", help="CSV of tickers (optionally with date / start_date,end_date columns) - also loaded as a universe")
+    sp.add_argument("--market", action="store_true", help="every US common stock via the grouped-daily endpoint")
+    sp.add_argument("--exchanges", nargs="*", help="with --market: keep only these primary exchanges, e.g. XNYS XNAS")
+    sp.add_argument("--start", help="YYYY-MM-DD; omit to refresh from the last stored date")
+    sp.add_argument("--end")
+    sp.add_argument("--universe", help="membership name to record (default: 'list' or 'us_stocks')")
+    sp.add_argument("--fundamentals", action="store_true", help="also load quarterly financials (needs the Financials plan)")
+    sp.add_argument("--sectors", action="store_true", help="also fetch SIC sectors (one call per ticker)")
+    sp.add_argument("--calls-per-minute", type=int, help="throttle, e.g. 5 on the free plan")
+
+    sp = add("universe", cmd_universe, "load an index constituent list as a point-in-time universe")
+    sp.add_argument("name")
+    sp.add_argument("file")
 
     sp = add("pitch", cmd_pitch, "plain-English idea -> strategy spec (Claude)")
     sp.add_argument("idea", help="the pitch; with --refine, the change you want")
@@ -260,6 +402,10 @@ def build_parser() -> argparse.ArgumentParser:
             sp.add_argument("--test-days", type=int, default=252)
             sp.add_argument("--expanding", action="store_true")
 
+    sp = add("dashboard", cmd_dashboard, "build runs/index.html comparing every run", data=False)
+    sp.add_argument("--runs", default="runs")
+    sp.add_argument("--open", action="store_true")
+
     sp = add("deploy", cmd_deploy, "size the strategy to a capital allocation and trade it on IBKR", spec=True)
     sp.add_argument("--capital", type=float, required=True, help="portfolio size allocated to this strategy")
     sp.add_argument("--send", action="store_true", help="actually place the orders (default: dry run)")
@@ -281,7 +427,7 @@ def main(argv: list[str] | None = None) -> None:
     except (ValueError, KeyError, FileNotFoundError) as e:
         sys.exit(f"error: {e}")
     except Exception as e:  # LLMError and friends: show the message, not a traceback
-        if type(e).__name__ in ("LLMError", "DSLError"):
+        if type(e).__name__ in ("LLMError", "DSLError", "MassiveError"):
             sys.exit(f"error: {e}")
         raise
 

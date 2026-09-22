@@ -52,7 +52,9 @@ strings holding either a number or the name of a param, so they are tunable too.
 - `rebalance`: "daily", "weekly" or "monthly". Match it to how fast the signal changes; \
 slow signals rebalanced daily just pay costs.
 - `universe`: `name` must be one of the universes listed below. Leave `tickers` empty \
-unless the pitch names specific stocks.
+unless the pitch names specific stocks. When the universe is "all" (the whole market), set \
+`min_adv` to a dollar-volume floor (e.g. 5000000 for $5m/day) so illiquid names are excluded; \
+mention the floor in `assumptions`.
 - `assumptions`: every judgement call you made where the pitch was silent or ambiguous, \
 one per line, so the member can see and challenge them.
 

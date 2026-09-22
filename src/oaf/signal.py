@@ -49,6 +49,20 @@ def validate_spec(spec: StrategySpec, fields: list[str], groups: list[str] | Non
     return problems
 
 
+def apply_universe(spec: StrategySpec, panel: Panel) -> Panel:
+    """Narrow a panel to the spec's ticker list and liquidity floor (point-in-time)."""
+    u = spec.universe
+    if u.tickers:
+        panel = panel.restrict(u.tickers)
+    if u.min_adv is not None:
+        adv = panel.fields.get("adv20")
+        if adv is None:
+            adv = (panel.fields["close"] * panel.fields["volume"]).rolling(20).mean() if "volume" in panel.fields else None
+        if adv is not None:
+            panel = Panel(fields=panel.fields, mask=panel.mask & (adv >= u.min_adv), groups=panel.groups, universe=panel.universe)
+    return panel
+
+
 def compute_scores(spec: StrategySpec, panel: Panel) -> pd.DataFrame:
     """The signal: higher score = more attractive to hold long. NaN outside the universe."""
     return dsl.evaluate(spec.signal, panel, spec.param_values())

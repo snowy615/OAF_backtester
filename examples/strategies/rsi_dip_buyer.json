@@ -4,13 +4,53 @@
   "idea": "Buy liquid stocks that are oversold on RSI while still in a long-term uptrend, and sell once RSI recovers.",
   "description": "Long-only mean reversion: enter when RSI drops below an oversold threshold while price is above its long moving average; exit when RSI recovers.",
   "hypothesis": "Short-lived liquidity shocks push healthy stocks below fair value; providing liquidity to forced sellers earns the rebound.",
-  "universe": {"name": "demo_index", "tickers": [], "description": ""},
+  "universe": {
+    "name": "all",
+    "tickers": [],
+    "min_adv": 5000000,
+    "description": "Every stock in the warehouse with at least $5m/day traded"
+  },
   "params": [
-    {"name": "rsi_window", "value": 14, "low": 5, "high": 30, "kind": "int", "description": "RSI lookback in days"},
-    {"name": "oversold", "value": 30, "low": 15, "high": 40, "kind": "float", "description": "RSI level below which a stock is bought"},
-    {"name": "recovered", "value": 55, "low": 45, "high": 70, "kind": "float", "description": "RSI level above which the position is closed"},
-    {"name": "trend_window", "value": 200, "low": 100, "high": 250, "kind": "int", "description": "Moving-average length defining the long-term uptrend"},
-    {"name": "position_cap", "value": 0.05, "low": 0.02, "high": 0.1, "kind": "float", "description": "Maximum weight of any one position"}
+    {
+      "name": "rsi_window",
+      "value": 14,
+      "low": 5,
+      "high": 30,
+      "kind": "int",
+      "description": "RSI lookback in days"
+    },
+    {
+      "name": "oversold",
+      "value": 30,
+      "low": 15,
+      "high": 40,
+      "kind": "float",
+      "description": "RSI level below which a stock is bought"
+    },
+    {
+      "name": "recovered",
+      "value": 55,
+      "low": 45,
+      "high": 70,
+      "kind": "float",
+      "description": "RSI level above which the position is closed"
+    },
+    {
+      "name": "trend_window",
+      "value": 200,
+      "low": 100,
+      "high": 250,
+      "kind": "int",
+      "description": "Moving-average length defining the long-term uptrend"
+    },
+    {
+      "name": "position_cap",
+      "value": 0.05,
+      "low": 0.02,
+      "high": 0.1,
+      "kind": "float",
+      "description": "Maximum weight of any one position"
+    }
   ],
   "signal": "-rsi(close, rsi_window)",
   "rules": {
@@ -30,5 +70,7 @@
     "vol_lookback": "60"
   },
   "rebalance": "daily",
-  "assumptions": ["Uninvested capital sits in cash earning nothing"]
+  "assumptions": [
+    "Uninvested capital sits in cash earning nothing"
+  ]
 }

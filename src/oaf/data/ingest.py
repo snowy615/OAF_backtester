@@ -197,6 +197,10 @@ def read_table(path: str | Path) -> pd.DataFrame:
         return pd.read_parquet(path)
     if path.suffix.lower() in (".xlsx", ".xls"):
         return pd.read_excel(path)
+    with open(path, encoding="utf-8-sig") as f:
+        head = f.readline()
+    if not any(d in head for d in ",;\t|"):  # single-column file: nothing to sniff
+        return pd.read_csv(path)
     return pd.read_csv(path, sep=None, engine="python")
 
 

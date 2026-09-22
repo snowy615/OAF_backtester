@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pandas as pd
 
-from .metrics import drawdown_series
 from .sim import BacktestResult
 
 _PCT = {"max_drawdown", "cumulative_return", "annualised_return", "annualised_vol", "hit_rate", "ic_hit_rate", "benchmark_annualised_return"}
@@ -88,8 +87,10 @@ def tearsheet(result: BacktestResult) -> str:
 """
 
 
-def save_run(result: BacktestResult, out_dir: str | Path) -> Path:
-    """Persist everything needed to audit or re-tune the run."""
+def save_run(result: BacktestResult, out_dir: str | Path, sweep_table=None, walk_forward=None) -> Path:
+    """Persist everything needed to audit or re-tune the run, plus the HTML report."""
+    from .dashboard import run_report
+
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     result.spec.save(out / "spec.json")
@@ -106,25 +107,5 @@ def save_run(result: BacktestResult, out_dir: str | Path) -> Path:
         }
     ).to_csv(out / "returns.csv", index_label="date")
     (out / "tearsheet.md").write_text(tearsheet(result))
-    _plot(result, out / "equity.png")
+    (out / "report.html").write_text(run_report(result, sweep_table=sweep_table, walk_forward=walk_forward))
     return out
-
-
-def _plot(result: BacktestResult, path: Path) -> None:
-    try:
-        import matplotlib
-
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-    except ImportError:
-        return
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6), sharex=True, gridspec_kw={"height_ratios": [3, 1]})
-    (1 + result.returns).cumprod().plot(ax=ax1, label=result.spec.name)
-    (1 + result.benchmark).cumprod().plot(ax=ax1, label="equal-weight universe", alpha=0.6)
-    ax1.set_ylabel("growth of 1")
-    ax1.legend()
-    drawdown_series(result.returns).plot(ax=ax2, color="firebrick")
-    ax2.set_ylabel("drawdown")
-    fig.tight_layout()
-    fig.savefig(path, dpi=120)
-    plt.close(fig)

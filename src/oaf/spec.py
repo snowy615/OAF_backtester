@@ -64,6 +64,7 @@ class Universe(BaseModel):
 
     name: str = "all"
     tickers: list[str] = []
+    min_adv: Optional[float] = None  # drop names whose 20-day average dollar volume is below this
     description: str = ""
 
 

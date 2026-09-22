@@ -27,7 +27,7 @@ from pydantic import BaseModel
 
 from . import metrics as M
 from .panel import Panel
-from .signal import compute_scores, target_weights
+from .signal import apply_universe, compute_scores, target_weights
 from .spec import StrategySpec
 
 
@@ -206,8 +206,7 @@ def run_backtest(
     ``n_trials`` / ``trial_sharpe_var`` describe how many configurations this one was
     picked from, so the deflated Sharpe can correct for the selection.
     """
-    if spec.universe.tickers:
-        panel = panel.restrict(spec.universe.tickers)
+    panel = apply_universe(spec, panel)
     scores = compute_scores(spec, panel)
     targets = target_weights(spec, panel, scores)
     sim = simulate(targets, panel, config, spec.rebalance)
