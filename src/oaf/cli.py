@@ -176,6 +176,9 @@ def cmd_fetch_massive(args) -> None:
     if refreshing and len(splits):  # a split since the last refresh re-bases the stored history
         _readjust(wh, mx, splits, start)
     got = prices["ticker"].unique()
+    if len(got) == 0:
+        print(f"{client.n_calls} API calls; no new sessions since {start} - warehouse unchanged ({n} price rows)")
+        return
     meta_rows = meta[meta["ticker"].isin(got)].copy()
     missing = sorted(set(got) - set(meta_rows["ticker"]))
     if missing:
