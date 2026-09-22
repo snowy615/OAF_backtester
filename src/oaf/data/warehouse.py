@@ -10,6 +10,7 @@ from typing import Optional, Sequence
 
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 
 from ..panel import Panel
 from . import schema
@@ -42,18 +43,23 @@ class Warehouse:
 
     # -- raw table IO ------------------------------------------------------
     def _path(self, table: str) -> Path:
-        return self.root / f"{table}.parquet"
+        return self.root / ("prices" if table == "prices" else f"{table}.parquet")
 
     def has(self, table: str) -> bool:
-        return self._path(table).exists()
+        p = self._path(table)
+        return p.is_dir() and any(p.glob("*.parquet")) if table == "prices" else p.exists()
 
-    def read(self, table: str) -> pd.DataFrame:
+    def read(self, table: str, columns: Optional[Sequence[str]] = None, filters=None) -> pd.DataFrame:
+        """Read a table. ``filters`` are pyarrow row filters, e.g. ``[("ticker", "in", [...])]``."""
         if not self.has(table):
-            return pd.DataFrame(columns=schema.TABLES[table])
-        return pd.read_parquet(self._path(table))
+            return pd.DataFrame(columns=list(columns) if columns else schema.TABLES[table])
+        df = pd.read_parquet(self._path(table), columns=list(columns) if columns else None, filters=filters)
+        if "ticker" in df.columns:
+            df["ticker"] = df["ticker"].astype(str)
+        return df.reset_index(drop=True)
 
-    def write(self, table: str, df: pd.DataFrame, keys: Sequence[str], source: str = "", replace: bool = False) -> int:
-        """Upsert ``df`` into ``table`` on ``keys`` (new rows win). Returns the row count after."""
+    @staticmethod
+    def _canonical(table: str, df: pd.DataFrame) -> pd.DataFrame:
         cols = schema.TABLES[table]
         missing = [c for c in cols if c not in df.columns]
         if missing:
@@ -62,6 +68,13 @@ class Warehouse:
         for c in cols:
             if c.endswith("date") or c == "period_end":
                 df[c] = pd.to_datetime(df[c]).astype("datetime64[ns]")
+        return df
+
+    def write(self, table: str, df: pd.DataFrame, keys: Sequence[str], source: str = "", replace: bool = False) -> int:
+        """Upsert ``df`` into ``table`` on ``keys`` (new rows win). Returns the row count after."""
+        if table == "prices":
+            return self.write_prices(df, source, replace)
+        df = self._canonical(table, df)
         if not replace and self.has(table):
             df = pd.concat([self.read(table), df], ignore_index=True)
         df = df.drop_duplicates(list(keys), keep="last").sort_values(list(keys)).reset_index(drop=True)
@@ -70,7 +83,23 @@ class Warehouse:
         return len(df)
 
     def write_prices(self, df: pd.DataFrame, source: str = "", replace: bool = False) -> int:
-        return self.write("prices", df, ["date", "ticker"], source, replace)
+        """Prices are stored one parquet file per year, so a whole-market history can be
+        written and refreshed a year at a time without holding all of it in memory."""
+        df = self._canonical("prices", df)
+        root = self._path("prices")
+        if replace and root.exists():
+            for f in root.glob("*.parquet"):
+                f.unlink()
+        root.mkdir(parents=True, exist_ok=True)
+        for year, chunk in df.groupby(df["date"].dt.year):
+            f = root / f"year={int(year)}.parquet"
+            if f.exists():
+                chunk = pd.concat([pd.read_parquet(f), chunk], ignore_index=True)
+            chunk = chunk.drop_duplicates(["date", "ticker"], keep="last").sort_values(["ticker", "date"]).reset_index(drop=True)
+            chunk.to_parquet(f, index=False)
+        total = sum(pq.read_metadata(f).num_rows for f in root.glob("*.parquet"))
+        self._log("prices", total, source)
+        return total
 
     def write_membership(self, df: pd.DataFrame, source: str = "", replace: bool = False) -> int:
         return self.write("membership", df, ["universe", "ticker", "start_date"], source, replace)
@@ -104,7 +133,7 @@ class Warehouse:
 
     # -- survivorship ------------------------------------------------------
     def survivorship_report(self) -> SurvivorshipReport:
-        px = self.read("prices")
+        px = self.read("prices", columns=["date", "ticker"])
         if px.empty:
             return SurvivorshipReport(0, 0, False, 0.0, ["warehouse has no prices"])
         last = px.groupby("ticker")["date"].max()
@@ -131,18 +160,38 @@ class Warehouse:
         tickers: Optional[Sequence[str]] = None,
         fundamentals: Optional[Sequence[str]] = None,
         max_staleness_days: int = 400,
+        min_dollar_volume: Optional[float] = None,
     ) -> Panel:
         """Build a point-in-time panel.
 
         ``fundamentals=None`` loads every fundamental field in the warehouse.
+        ``min_dollar_volume`` drops tickers that *never* trade that much in a day - a
+        cheap superset of ``Universe.min_adv`` that keeps whole-market panels tractable
+        (a 20-day average can only reach the floor if some single day did).
         """
-        px = self.read("prices")
-        if px.empty:
-            raise ValueError(f"warehouse {self.root} has no prices; ingest some first")
-        if tickers:
-            px = px[px["ticker"].isin(list(tickers))]
+        filters = []
         if end is not None:
-            px = px[px["date"] <= pd.Timestamp(end)]
+            filters.append(("date", "<=", pd.Timestamp(end)))
+        if tickers:
+            filters.append(("ticker", "in", [str(t) for t in tickers]))
+        if universe != "all":
+            mem = self.read("membership")
+            mem = mem[mem["universe"] == universe]
+            if mem.empty:
+                raise ValueError(f"unknown universe {universe!r}; available: {self.universes()}")
+            filters.append(("ticker", "in", sorted(mem["ticker"].unique())))
+        if min_dollar_volume is not None:
+            dv = self.read("prices", columns=["ticker", "close", "volume"], filters=filters or None)
+            dv["dv"] = dv["close"] * dv["volume"]
+            liquid = dv.groupby("ticker")["dv"].max()
+            keep = sorted(liquid[liquid >= min_dollar_volume].index)
+            del dv
+            if not keep:
+                raise ValueError(f"warehouse {self.root} has no prices for this selection; ingest some first")
+            filters.append(("ticker", "in", keep))
+        px = self.read("prices", filters=filters or None)
+        if px.empty:
+            raise ValueError(f"warehouse {self.root} has no prices for this selection; ingest some first")
         # start is applied after indicators' history is available to the caller: keep all
         # rows <= end so lookbacks at `start` are warm, then cut at the very end.
 
@@ -184,10 +233,6 @@ class Warehouse:
 
         mask = raw_close.notna()
         if universe != "all":
-            mem = self.read("membership")
-            mem = mem[mem["universe"] == universe]
-            if mem.empty:
-                raise ValueError(f"unknown universe {universe!r}; available: {self.universes()}")
             mask &= _membership_mask(mem, adj.index, adj.columns)
 
         groups = {}

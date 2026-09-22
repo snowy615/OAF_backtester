@@ -30,7 +30,8 @@ def _load_dotenv(path: Path = Path(".env")) -> None:
 def _panel(args, spec: StrategySpec | None = None):
     wh = Warehouse(args.warehouse)
     universe = args.universe or (spec.universe.name if spec else "all")
-    return wh, wh.load_panel(universe=universe, start=args.start, end=args.end)
+    min_dv = spec.universe.min_adv if spec else None
+    return wh, wh.load_panel(universe=universe, start=args.start, end=args.end, min_dollar_volume=min_dv)
 
 
 def _spec_and_config(args) -> tuple[StrategySpec, SimConfig]:
@@ -133,8 +134,16 @@ def cmd_fetch_massive(args) -> None:
         listed = meta if not exchanges else meta[meta["primary_exchange"].isin(exchanges)]
         keep_set = set(listed["ticker"])
         splits = mx.fetch_splits(client, start=start if refreshing else None)
-        prices = mx.fetch_market(client, start, args.end, keep=keep_set.__contains__, splits=splits, progress=_bar("day"))
         universe_name = universe_name or "us_stocks"
+        got_all: set[str] = set()
+        workers = 1 if args.calls_per_minute else 8
+        for year, chunk in mx.iter_market_years(client, start, args.end, keep=keep_set.__contains__, splits=splits, progress=_bar("day"), workers=workers):
+            chunk, report = clean_prices(chunk)
+            got_all |= set(chunk["ticker"].unique())
+            print(f"  {year}: {report.rows_out} rows written ({', '.join(f'{k} {v}' for k, v in report.dropped.items()) or 'nothing dropped'})")
+            wh.write_prices(chunk, source=f"massive:{year}")
+        prices = pd.DataFrame({"ticker": sorted(got_all)})  # tickers only; rows are already on disk
+        report = None
     else:
         tickers = list(args.tickers or [])
         if args.tickers_file:
@@ -148,13 +157,15 @@ def cmd_fetch_massive(args) -> None:
         prices = mx.fetch_daily_bars(client, tickers, start, args.end, splits=splits, progress=_bar("ticker"))
         universe_name = universe_name or "list"
 
-    prices, report = clean_prices(prices)
-    print(report.summary())
-    if prices.empty:
-        sys.exit("error: Massive returned no bars (check the plan's history limit and the tickers)")
-    n = wh.write_prices(prices, source="massive")
+    if not args.market:
+        prices, report = clean_prices(prices)
+        print(report.summary())
+        if prices.empty:
+            sys.exit("error: Massive returned no bars (check the plan's history limit and the tickers)")
+        wh.write_prices(prices, source="massive")
+    n = wh.read("prices", columns=["ticker"]).shape[0]
     if refreshing and len(splits):  # a split since the last refresh re-bases the stored history
-        n = wh.write_prices(mx.readjust_history(wh.read("prices"), splits, start), source="massive:readjust", replace=True)
+        _readjust(wh, mx, splits, start)
     got = prices["ticker"].unique()
     meta_rows = meta[meta["ticker"].isin(got)].copy()
     missing = sorted(set(got) - set(meta_rows["ticker"]))
@@ -173,8 +184,7 @@ def cmd_fetch_massive(args) -> None:
     wh.write_meta(meta_rows[schema.META], source="massive")
 
     if not args.tickers_file:  # a constituent file is loaded as-is via `oaf universe`
-        all_prices = wh.read("prices")
-        all_prices = all_prices[all_prices["ticker"].isin(got)]
+        all_prices = wh.read("prices", columns=["date", "ticker"], filters=[("ticker", "in", list(got))])
         wh.write_membership(mx.membership_from_prices(all_prices, wh.read("meta"), universe_name), source="massive", replace=False)
     else:
         from .data.universes import load_membership
@@ -189,6 +199,19 @@ def cmd_fetch_massive(args) -> None:
 
     print(f"{client.n_calls} API calls; warehouse now holds {n} price rows, universe '{universe_name}'")
     print(wh.survivorship_report().summary())
+
+
+def _readjust(wh: Warehouse, mx, splits: pd.DataFrame, since: str) -> None:
+    """Re-base stored adj_close for splits since ``since``, one price partition at a time."""
+    touched = set(splits.loc[splits["execution_date"] >= pd.Timestamp(since), "ticker"])
+    if not touched:
+        return
+    for f in sorted(wh._path("prices").glob("*.parquet")):
+        part = pd.read_parquet(f)
+        hit = part["ticker"].isin(touched)
+        if hit.any():
+            part.loc[hit] = mx.readjust_history(part[hit], splits, since)
+            part.to_parquet(f, index=False)
 
 
 def cmd_universe(args) -> None:

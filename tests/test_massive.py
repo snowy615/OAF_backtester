@@ -87,6 +87,13 @@ def test_fundamentals_keyed_on_filing_date(client):
     assert (f["available_date"] == pd.Timestamp("2024-02-02")).all() and (f["period_end"] == pd.Timestamp("2023-12-30")).all()
 
 
+def test_restamped_filing_dates_are_capped():
+    late = mx.MassiveClient(transport=lambda url: {"status": "OK", "results": [
+        {"tickers": ["X"], "filing_date": "2025-07-31", "period_end": "2024-06-29", "revenue": 1.0}] if "income" in url else []})
+    f = mx.fetch_fundamentals(late, ["X"])
+    assert f["available_date"].iloc[0] == pd.Timestamp("2024-06-29") + pd.Timedelta(days=90)
+
+
 def test_membership_from_prices_and_snapshot_files(tmp_path):
     px = pd.DataFrame({"date": pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-02"]), "ticker": ["AAPL", "AAPL", "DEAD"]})
     meta = pd.DataFrame({"ticker": ["DEAD"], "delisted_date": pd.to_datetime(["2024-01-02"])})

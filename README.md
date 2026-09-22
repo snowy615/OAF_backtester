@@ -157,7 +157,20 @@ A membership interval (first bar → delisting date) is written for every fetche
 `--universe NAME`; with `--tickers-file` the file's own dates are used instead. Re-running
 without `--start` appends from the last stored date and re-bases stored history for any split
 that happened since. Set `MASSIVE_API_KEY` in `.env`; on the free plan pass
-`--calls-per-minute 5`. Financials need the Stocks Advanced plan or the Financials add-on.
+`--calls-per-minute 5` (which also disables the 8-way parallel day fetching). Financials need
+the Stocks Advanced plan or the Financials add-on.
+
+`--market` is built for laptops: days are fetched in parallel, each calendar year is cleaned
+and written as its own parquet partition (`data/warehouse/prices/year=YYYY.parquet`), and a
+decade of the whole US market (~20M rows) loads in about 10 minutes without ever being held
+in memory at once. When a strategy sets `universe.min_adv`, `load_panel` only reads tickers
+that ever traded that much in a day (an exact superset of the point-in-time filter), so a
+whole-market backtest pivots a few thousand names rather than all ~10,000.
+
+Massive's `filing_date` on financials is the *latest* filing that contained the period, which
+re-stamps a quarter when it reappears as a comparative a year later. `available_date` is
+therefore capped at `period_end + 90 days` (the SEC's outside 10-K deadline) - never earlier
+than a filing could have happened, but no longer a year stale.
 
 Massive does not publish index constituents. For a point-in-time S&P 500 (or any index),
 supply a CSV of dated snapshots (`date,ticker`) or intervals (`ticker,start_date,end_date`)

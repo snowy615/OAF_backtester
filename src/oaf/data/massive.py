@@ -29,7 +29,9 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -43,6 +45,7 @@ import pandas as pd
 from . import schema
 
 BASE_URL = "https://api.massive.com"
+FILING_LAG_CAP_DAYS = 90  # SEC 10-K outside deadline; see fetch_fundamentals
 ENV_KEY = "MASSIVE_API_KEY"
 
 # income-statement / balance-sheet keys -> warehouse fundamental field names
@@ -82,17 +85,19 @@ class MassiveClient:
         if not self.api_key and self.transport is None:
             raise MassiveError(f"no Massive API key: set {ENV_KEY} in the environment or .env")
         self._last_calls: list[float] = []
+        self._lock = threading.Lock()
         self.n_calls = 0
 
     # -- transport -----------------------------------------------------------
     def _throttle(self) -> None:
         if not self.calls_per_minute:
             return
-        now = time.monotonic()
-        self._last_calls = [t for t in self._last_calls if now - t < 60]
-        if len(self._last_calls) >= self.calls_per_minute:
-            time.sleep(60 - (now - self._last_calls[0]) + 0.05)
-        self._last_calls.append(time.monotonic())
+        with self._lock:
+            now = time.monotonic()
+            self._last_calls = [t for t in self._last_calls if now - t < 60]
+            if len(self._last_calls) >= self.calls_per_minute:
+                time.sleep(60 - (now - self._last_calls[0]) + 0.05)
+            self._last_calls.append(time.monotonic())
 
     def _fetch(self, url: str) -> dict:
         if self.transport is not None:
@@ -136,7 +141,8 @@ class MassiveClient:
             data = self._fetch(url)
             if data.get("status") not in (None, "OK", "DELAYED"):
                 raise MassiveError(f"Massive returned {data.get('status')}: {data.get('error') or data.get('message')}")
-            out.extend(data.get("results") or [])
+            results = data.get("results") or []
+            out.extend(results if isinstance(results, list) else [results])  # single-object endpoints
             url = data.get("next_url")
         return out
 
@@ -253,6 +259,41 @@ def fetch_market(
     return apply_splits(prices, splits)
 
 
+def iter_market_years(
+    client: MassiveClient,
+    start: str,
+    end: Optional[str] = None,
+    keep: Optional[Callable[[str], bool]] = None,
+    splits: Optional[pd.DataFrame] = None,
+    progress: Optional[Callable[[int, int, str], None]] = None,
+    workers: int = 8,
+):
+    """Like :func:`fetch_market` but yields one split-adjusted frame per calendar year,
+    so a decade of the whole market never has to sit in memory at once. Days within a
+    year are fetched concurrently (paid plans have no call limit; set ``workers=1`` and
+    ``calls_per_minute`` on the free plan)."""
+    if splits is None:
+        splits = fetch_splits(client, start=start)
+    days = pd.bdate_range(start, end or date.today())
+    done = 0
+
+    def one_day(d):
+        day = d.strftime("%Y-%m-%d")
+        df = _bars_frame(client.get(f"/v2/aggs/grouped/locale/us/market/stocks/{day}", adjusted=False))
+        return day, (df[df["ticker"].map(keep)] if keep is not None and len(df) else df)
+
+    for year, chunk_days in days.groupby(days.year).items():
+        frames = []
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+            for day, df in pool.map(one_day, chunk_days):
+                frames.append(df)
+                done += 1
+                if progress:
+                    progress(done, len(days), day)
+        prices = pd.concat(frames, ignore_index=True) if frames else _bars_frame([])
+        yield int(year), apply_splits(prices, splits[splits["ticker"].isin(prices["ticker"].unique())])
+
+
 def readjust_history(prices: pd.DataFrame, splits: pd.DataFrame, since: str) -> pd.DataFrame:
     """After a refresh, fold splits executed on/after ``since`` into rows stored earlier.
 
@@ -299,8 +340,7 @@ def fetch_sectors(client: MassiveClient, tickers: Sequence[str], progress: Optio
             res = client.get(f"/v3/reference/tickers/{t}")
         except MassiveError:
             res = []
-        detail = res[0] if isinstance(res, list) and res else (res if isinstance(res, dict) else {})
-        out[t] = detail.get("sic_description")
+        out[t] = res[0].get("sic_description") if res else None
         if progress:
             progress(i + 1, len(tickers), t)
     return pd.Series(out, name="sector")
@@ -314,10 +354,11 @@ def fetch_fundamentals(
 ) -> pd.DataFrame:
     """Quarterly income-statement and balance-sheet items -> ``fundamentals`` rows.
 
-    ``available_date`` = Massive's ``filing_date``. Massive reports the *latest* filing
-    that contained a period (restated comparatives share it), so an old quarter can look
-    like it became known later than it really did. That errs on the side of caution -
-    it can never leak the future into a backtest.
+    ``available_date`` = ``min(filing_date, period_end + FILING_LAG_CAP_DAYS)``. Massive's
+    ``filing_date`` is the *latest* filing that contained a period - prior-year comparatives
+    in a 10-K re-stamp a quarter about 13 months after it was first reported - which would
+    make every number look a year stale. The cap is the SEC's outside deadline for the
+    annual report, so a number is never made visible before it could have been filed.
     """
     rows = []
     batches = [list(tickers)[i : i + 50] for i in range(0, len(tickers), 50)]
@@ -341,6 +382,8 @@ def fetch_fundamentals(
     df = pd.DataFrame(rows, columns=schema.FUNDAMENTALS)
     df["period_end"] = pd.to_datetime(df["period_end"])
     df["available_date"] = pd.to_datetime(df["available_date"])
+    cap = df["period_end"] + pd.Timedelta(days=FILING_LAG_CAP_DAYS)
+    df["available_date"] = df["available_date"].where(df["available_date"] <= cap, cap)
     return df.drop_duplicates(["ticker", "field", "period_end", "available_date"]).reset_index(drop=True)
 
 

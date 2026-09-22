@@ -91,7 +91,7 @@ def test_membership_mask_is_point_in_time(small_wh):
     mask = wh.load_panel("idx").mask
     assert mask["LIVE"].tolist() == [False] * 3 + [True] * 7
     assert mask["DEAD"].tolist() == [True] * 3 + [False] * 7
-    assert not mask["SPLIT"].any()
+    assert "SPLIT" not in mask.columns  # never a member -> not even loaded
 
 
 def test_delisting_and_split_handling(small_wh):
@@ -116,3 +116,23 @@ def test_upsert_and_survivorship_warning(tmp_path):
 def test_demo_warehouse_is_healthy(warehouse):
     report = warehouse.survivorship_report()
     assert report.n_delisted > 0 and report.has_membership and not report.warnings
+
+
+def test_prices_are_partitioned_by_year_and_upserted(tmp_path):
+    wh = Warehouse(tmp_path / "wh")
+    d = pd.bdate_range("2023-12-28", "2024-01-03")
+    wh.write_prices(_prices("A", d, np.arange(len(d), dtype=float) + 1))
+    assert sorted(f.name for f in (wh.root / "prices").glob("*.parquet")) == ["year=2023.parquet", "year=2024.parquet"]
+    assert wh.write_prices(_prices("A", d[-1:], [99.0])) == len(d)  # upsert, not append
+    assert wh.read("prices").sort_values("date")["close"].iloc[-1] == 99.0
+    assert wh.read("prices", columns=["ticker"], filters=[("date", ">=", pd.Timestamp("2024-01-01"))]).shape[0] == 3
+
+
+def test_liquidity_prefilter_is_a_superset_of_min_adv(small_wh):
+    wh, d = small_wh
+    full = wh.load_panel()
+    with pytest.raises(ValueError, match="no prices for this selection"):
+        wh.load_panel(min_dollar_volume=1e9)
+    lite = wh.load_panel(min_dollar_volume=60_000)  # SPLIT trades ~100 * 1000 = 100k/day; DEAD ~50k
+    assert "DEAD" not in lite.tickers and "SPLIT" in lite.tickers and "LIVE" in lite.tickers
+    assert set(lite.tickers) <= set(full.tickers)
