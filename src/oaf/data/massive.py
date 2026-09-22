@@ -166,7 +166,12 @@ def _bars_frame(results: Iterable[dict], ticker: Optional[str] = None) -> pd.Dat
         for r in results
         if r.get("c") is not None
     ]
-    return pd.DataFrame(rows, columns=["date", "ticker", "open", "high", "low", "close", "volume"])
+    df = pd.DataFrame(rows, columns=["date", "ticker", "open", "high", "low", "close", "volume"])
+    df["date"] = pd.to_datetime(df["date"]).astype("datetime64[ns]")
+    df["ticker"] = df["ticker"].astype(str)
+    for c in ("open", "high", "low", "close", "volume"):
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df
 
 
 def split_factors(splits: pd.DataFrame, prices: pd.DataFrame) -> pd.Series:
@@ -174,16 +179,30 @@ def split_factors(splits: pd.DataFrame, prices: pd.DataFrame) -> pd.Series:
 
     A ``split_from -> split_to`` split executed on day D divides every price before D by
     ``split_to / split_from``. ``splits`` has columns ticker, execution_date, split_from,
-    split_to.
+    split_to. Vectorised: each price row picks up the product of all later splits of its
+    ticker via a forward ``merge_asof``.
     """
     factor = pd.Series(1.0, index=prices.index)
-    if splits.empty:
+    sp = splits[["ticker", "execution_date", "split_from", "split_to"]].dropna()
+    sp = sp[(sp["split_from"] > 0) & (sp["split_to"] > 0) & sp["ticker"].isin(prices["ticker"].unique())]
+    if sp.empty:
         return factor
-    for (ticker, exec_date, s_from, s_to) in splits[["ticker", "execution_date", "split_from", "split_to"]].itertuples(index=False):
-        if not s_from or not s_to:
-            continue
-        before = (prices["ticker"] == ticker) & (prices["date"] < exec_date)
-        factor[before] *= float(s_from) / float(s_to)
+    sp = sp.assign(ratio=sp["split_from"].astype(float) / sp["split_to"].astype(float))
+    sp["ticker"] = sp["ticker"].astype(str)
+    sp["execution_date"] = pd.to_datetime(sp["execution_date"]).astype("datetime64[ns]")
+    # several actions on one day (e.g. a paired 1:10000 / 10000:1 going-private split) net out
+    sp = sp.groupby(["ticker", "execution_date"], as_index=False)["ratio"].prod()
+    sp = sp.sort_values(["ticker", "execution_date"], ascending=[True, False], kind="stable")
+    sp["cum"] = sp.groupby("ticker")["ratio"].cumprod()  # product of this split and every later one
+    sp = sp.sort_values("execution_date", kind="stable")
+    left = prices[["ticker", "date"]].reset_index().sort_values("date", kind="stable")
+    left["date"] = pd.to_datetime(left["date"]).astype("datetime64[ns]")
+    left["ticker"] = left["ticker"].astype(str)
+    merged = pd.merge_asof(
+        left, sp[["ticker", "execution_date", "cum"]], left_on="date", right_on="execution_date",
+        by="ticker", direction="forward", allow_exact_matches=False,
+    )
+    factor.loc[merged["index"].values] = merged["cum"].fillna(1.0).values
     return factor
 
 
@@ -290,6 +309,7 @@ def iter_market_years(
                 done += 1
                 if progress:
                     progress(done, len(days), day)
+        frames = [f for f in frames if len(f)]  # holidays return no bars
         prices = pd.concat(frames, ignore_index=True) if frames else _bars_frame([])
         yield int(year), apply_splits(prices, splits[splits["ticker"].isin(prices["ticker"].unique())])
 

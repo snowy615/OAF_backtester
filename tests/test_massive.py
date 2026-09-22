@@ -28,6 +28,8 @@ def transport(url):
         base = 100 if t == "AAPL" else 20
         return {"status": "OK", "results": [_bar(T0, base), _bar(T0 + DAY, base / 2 if t == "AAPL" else base)]}
     if "/v2/aggs/grouped/" in path:
+        if path.endswith("2024-01-01"):  # holiday: no bars
+            return {"status": "OK", "resultsCount": 0}
         return {"status": "OK", "results": [_bar(T0, 100, "AAPL"), _bar(T0, 20, "ZZZ"), _bar(T0, 5, "SPY")]}
     if "/stocks/v1/splits" in path:
         return {"status": "OK", "results": [{"ticker": "AAPL", "execution_date": "2024-01-03", "split_from": 1, "split_to": 2, "adjustment_type": "forward_split"}]}
@@ -72,6 +74,10 @@ def test_market_fetch_filters_tickers_and_pages_tickers(client):
     keep = set(meta["ticker"])
     px = mx.fetch_market(client, "2024-01-02", "2024-01-02", keep=keep.__contains__)
     assert sorted(px["ticker"]) == ["AAPL", "ZZZ"]  # SPY is not a common stock
+    years = list(mx.iter_market_years(client, "2024-01-01", "2024-01-02", keep=keep.__contains__, workers=2))
+    assert len(years) == 1 and years[0][0] == 2024
+    chunk = years[0][1]
+    assert str(chunk["date"].dtype) == "datetime64[ns]" and sorted(chunk["ticker"]) == ["AAPL", "ZZZ"]
 
 
 def test_readjust_history_after_a_late_split():
@@ -115,3 +121,13 @@ def test_api_error_status_is_raised():
     c = mx.MassiveClient(transport=lambda url: {"status": "NOT_AUTHORIZED", "message": "not entitled"})
     with pytest.raises(mx.MassiveError, match="not entitled"):
         c.get("/v2/aggs/grouped/locale/us/market/stocks/2024-01-02")
+
+
+def test_same_day_split_pair_nets_out_and_is_chunk_independent():
+    splits = pd.DataFrame({"ticker": ["A", "A", "A"], "execution_date": pd.to_datetime(["2024-07-29", "2024-07-29", "2020-01-01"]),
+                           "split_from": [1, 10000, 1], "split_to": [10000, 1, 2]})
+    full = pd.DataFrame({"date": pd.to_datetime(["2019-12-31", "2020-01-02", "2024-08-01"]), "ticker": "A", "close": [100.0, 50.0, 50.0]})
+    f = mx.split_factors(splits, full)
+    assert f.tolist() == [0.5, 1.0, 1.0]
+    for i in range(3):  # each row alone gives the same factor as inside the full frame
+        assert mx.split_factors(splits, full.iloc[[i]].reset_index(drop=True)).iloc[0] == f.iloc[i]

@@ -161,6 +161,8 @@ class Warehouse:
         fundamentals: Optional[Sequence[str]] = None,
         max_staleness_days: int = 400,
         min_dollar_volume: Optional[float] = None,
+        max_gap_sessions: int = 20,
+        max_daily_gain: float = 9.0,
     ) -> Panel:
         """Build a point-in-time panel.
 
@@ -168,6 +170,9 @@ class Warehouse:
         ``min_dollar_volume`` drops tickers that *never* trade that much in a day - a
         cheap superset of ``Universe.min_adv`` that keeps whole-market panels tractable
         (a 20-day average can only reach the floor if some single day did).
+        ``max_gap_sessions`` and ``max_daily_gain`` break a return series where a symbol
+        reappears after a long silence or jumps more than 10x in a day: both are data
+        artefacts (ticker reuse, missing reverse splits, bad ticks) rather than returns.
         """
         filters = []
         if end is not None:
@@ -207,6 +212,19 @@ class Warehouse:
         alive = adj.bfill().notna()
         px_ff = adj.ffill().where(alive)
         returns = px_ff.pct_change(fill_method=None)
+        # A symbol that reappears after a long silence is usually a *different* company
+        # (exchanges recycle tickers), so no return is booked across the gap.
+        has = adj.notna().values
+        pos = np.arange(len(adj))[:, None]
+        last_print = pd.DataFrame(np.where(has, pos, np.nan), index=adj.index, columns=adj.columns).ffill().shift(1).values
+        rejoin = has & ((pos - last_print) > max_gap_sessions)
+        returns = returns.mask(rejoin)
+        # A >10x single-session gain is a missing reverse split, a post-bankruptcy re-listing
+        # or a bad tick (a $5m/day stock does not really do that), so it is also a break; a
+        # >90% crash that such a jump immediately undoes was the bad tick itself.
+        jump = returns > max_daily_gain
+        tick = (returns < -0.9) & jump.shift(-1, fill_value=False)
+        returns = returns.mask(jump | tick)
 
         meta = self.read("meta")
         returns = _apply_delisting_returns(returns, adj, meta)

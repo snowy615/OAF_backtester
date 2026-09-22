@@ -124,6 +124,15 @@ def cmd_fetch_massive(args) -> None:
         start = (existing["date"].max() + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
         print(f"refreshing from {start}")
 
+    if args.rebuild_adjusted:  # recompute adj_close from a fresh splits table; no bars are fetched
+        splits = mx.fetch_splits(client)
+        for f in sorted(wh._path("prices").glob("*.parquet")):
+            part = pd.read_parquet(f)
+            mx.apply_splits(part, splits).to_parquet(f, index=False)
+            print(f"  re-adjusted {f.name}")
+        print(f"{client.n_calls} API calls; adj_close rebuilt from {len(splits)} splits")
+        return
+
     print("tickers (active + delisted)...")
     meta = mx.fetch_tickers(client, include_delisted=True)
     universe_name = args.universe
@@ -396,6 +405,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--fundamentals", action="store_true", help="also load quarterly financials (needs the Financials plan)")
     sp.add_argument("--sectors", action="store_true", help="also fetch SIC sectors (one call per ticker)")
     sp.add_argument("--calls-per-minute", type=int, help="throttle, e.g. 5 on the free plan")
+    sp.add_argument("--rebuild-adjusted", action="store_true", help="only recompute adj_close from a fresh splits table")
 
     sp = add("universe", cmd_universe, "load an index constituent list as a point-in-time universe")
     sp.add_argument("name")

@@ -136,3 +136,28 @@ def test_liquidity_prefilter_is_a_superset_of_min_adv(small_wh):
     lite = wh.load_panel(min_dollar_volume=60_000)  # SPLIT trades ~100 * 1000 = 100k/day; DEAD ~50k
     assert "DEAD" not in lite.tickers and "SPLIT" in lite.tickers and "LIVE" in lite.tickers
     assert set(lite.tickers) <= set(full.tickers)
+
+
+def test_reappearing_ticker_books_no_return_across_the_gap(tmp_path):
+    wh = Warehouse(tmp_path / "wh")
+    d = pd.bdate_range("2024-01-01", periods=60)
+    old = _prices("X", d[:10], np.full(10, 1.0))
+    new = _prices("X", d[40:], np.full(20, 100.0))  # same symbol, different company
+    wh.write_prices(pd.concat([old, new, _prices("Y", d, np.full(60, 5.0))]))  # Y keeps every session in the calendar
+    r = wh.load_panel().returns["X"]
+    assert pd.isna(r.loc[d[40]]) and r.loc[d[41]] == 0 and (r.loc[d[10:39]].fillna(0) == 0).all()
+    assert wh.load_panel(max_gap_sessions=100, max_daily_gain=1e9).returns["X"].loc[d[40]] == pytest.approx(99.0)
+
+
+def test_impossible_jumps_are_breaks_not_returns(tmp_path):
+    wh = Warehouse(tmp_path / "wh")
+    d = pd.bdate_range("2024-01-01", periods=8)
+    wh.write_prices(pd.concat([
+        _prices("REV", d, [0.05, 0.05, 0.05, 24.0, 25.0, 25.0, 25.0, 25.0]),      # missing 1:480 reverse split
+        _prices("TICK", d, [10.0, 10.0, 0.001, 10.5, 10.5, 10.5, 10.5, 10.5]),   # one bad print
+        _prices("BIG", d, [1.0, 1.0, 1.0, 4.0, 4.0, 4.0, 4.0, 4.0]),              # a real 4x squeeze survives
+    ]))
+    r = wh.load_panel().returns
+    assert pd.isna(r.loc[d[3], "REV"]) and r.loc[d[4], "REV"] == pytest.approx(25 / 24 - 1)
+    assert pd.isna(r.loc[d[2], "TICK"]) and pd.isna(r.loc[d[3], "TICK"])
+    assert r.loc[d[3], "BIG"] == pytest.approx(3.0)

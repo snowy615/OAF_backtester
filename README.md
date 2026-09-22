@@ -167,6 +167,15 @@ in memory at once. When a strategy sets `universe.min_adv`, `load_panel` only re
 that ever traded that much in a day (an exact superset of the point-in-time filter), so a
 whole-market backtest pivots a few thousand names rather than all ~10,000.
 
+Real market data has defects a backtest must not mistake for returns. `load_panel` breaks a
+return series (no P&L is booked) where a symbol reappears after more than 20 sessions of
+silence (exchanges recycle tickers: Basic Energy re-listed as `BAS` after bankruptcy) or
+gains more than 10x in one session (reverse splits missing from the split table such as
+Ocean Rig's 1:9,200, bad prints such as a $0.0001 tick). Both thresholds are arguments to
+`load_panel`. Paired same-day actions (a 1:10,000 forward + 10,000:1 reverse going-private
+split) are netted before adjustment. `oaf fetch-massive --rebuild-adjusted` recomputes
+`adj_close` from a fresh split table without re-downloading bars.
+
 Massive's `filing_date` on financials is the *latest* filing that contained the period, which
 re-stamps a quarter when it reappears as a comparative a year later. `available_date` is
 therefore capped at `period_end + 90 days` (the SEC's outside 10-K deadline) - never earlier
