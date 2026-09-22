@@ -73,7 +73,7 @@ changes, splits and lagged fundamentals) and every command takes `-w data/demo`.
 | 3 | Entry/exit conditions + frequency, all adjustable | edit the JSON, `--set knob=value`, or `oaf pitch --refine` | `oaf.spec` |
 | 4 | Simulate a portfolio trading it | `oaf backtest` | `oaf.signal`, `oaf.sim` |
 | 5 | Systematic parameter tuning | `oaf sweep`, `oaf walkforward` | `oaf.sweep` |
-| 6 | Performance metrics | printed + `runs/<name>/` (tearsheet, CSVs, plot) | `oaf.metrics`, `oaf.report` |
+| 6 | Performance metrics | printed + `runs/<name>/report.html` + CSVs | `oaf.metrics`, `oaf.report` |
 | 7–9 | Connect to IBKR, allocate size, trade | `oaf deploy --capital N [--send]` | `oaf.deploy` |
 
 Data gets in through `oaf fetch-massive` (primary), `oaf universe` for constituent lists,
@@ -97,7 +97,7 @@ only ever overrides `params` (plus `rebalance` and `sim.*` settings).
   "construction": {"mode": "quantile", "direction": "long_short", "weighting": "equal",
                    "long_quantile": "top_quantile", "short_quantile": "top_quantile", "max_weight": "0.1"},
   "rebalance": "weekly",
-  "universe": {"name": "demo_index"}
+  "universe": {"name": "all", "min_adv": 5000000}
 }
 ```
 
